@@ -43,7 +43,7 @@ EMPTY_RESULT_INDICATORS = [
 # Bandwidth
 BANDWIDTH_LOG_EVERY_N_PAGES = 100
 
-# Browser visibility (default True for headless, e.g. Ubuntu/server; set ROCKAUTO_HEADLESS=0 to show window)
+# Browser visibility (default True for Ubuntu/server; set ROCKAUTO_HEADLESS=0 to show window)
 HEADLESS = os.getenv("ROCKAUTO_HEADLESS", "1").strip().lower() in ("1", "true", "yes")
 
 # Keep browser open after run until user presses Enter (default True when visible; set ROCKAUTO_KEEP_BROWSER_OPEN=0 to close immediately)
