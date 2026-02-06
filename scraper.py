@@ -387,8 +387,15 @@ def _slug_to_label(slug: str) -> str:
     return slug.replace("+", " ").strip().title()
 
 
+def _label_to_slug(label: str) -> str:
+    """Turn display label into URL slug (e.g. Ford -> ford, F-150 -> f-150)."""
+    if not label:
+        return ""
+    return label.lower().replace(" ", "+").strip()
+
+
 def _write_make_year_model_csv(vehicles: list[dict]) -> int:
-    """Write all make,year,model pairs from discovered vehicles to MAKE_YEAR_MODEL_CSV. Returns count written."""
+    """Write all make,year,model pairs from discovered vehicles to MAKE_YEAR_MODEL_CSV. Returns count written. URL is omitted since it can be derived from make, year, model."""
     if not vehicles:
         return 0
     out = []
@@ -398,29 +405,36 @@ def _write_make_year_model_csv(vehicles: list[dict]) -> int:
         model_slug = v.get("model_slug") or ""
         if not (make_slug and year and model_slug):
             continue
-        url = _make_catalog_url(make_slug, year, model_slug, None)
         out.append({
             "make": v.get("make") or _slug_to_label(make_slug),
             "year": year,
             "model": v.get("model") or _slug_to_label(model_slug),
-            "url": url,
         })
     with open(MAKE_YEAR_MODEL_CSV, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=["make", "year", "model", "url"])
+        w = csv.DictWriter(f, fieldnames=["make", "year", "model"])
         w.writeheader()
         w.writerows(out)
     return len(out)
 
 
 def _load_make_year_model_csv() -> list[dict]:
-    """Load make,year,model,url rows from MAKE_YEAR_MODEL_CSV. Returns list of dicts with make, year, model, url."""
+    """Load make,year,model rows from MAKE_YEAR_MODEL_CSV. Returns list of dicts with make, year, model, url (url built from make/year/model if not in CSV)."""
     if not MAKE_YEAR_MODEL_CSV.exists():
         return []
     out = []
     with open(MAKE_YEAR_MODEL_CSV, newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
-            if row.get("url") and row.get("make") and row.get("year") and row.get("model"):
-                out.append({"make": row["make"], "year": row["year"], "model": row["model"], "url": row["url"]})
+            make = (row.get("make") or "").strip()
+            year = (row.get("year") or "").strip()
+            model = (row.get("model") or "").strip()
+            if not (make and year and model):
+                continue
+            url = (row.get("url") or "").strip()
+            if not url:
+                make_slug = _label_to_slug(make)
+                model_slug = _label_to_slug(model)
+                url = _make_catalog_url(make_slug, year, model_slug, None)
+            out.append({"make": make, "year": year, "model": model, "url": url})
     return out
 
 
@@ -859,6 +873,8 @@ async def _collect_products_from_listing(
     rows = await page.evaluate(
         """(baseUrl) => {
             const out = [];
+            const multiOptionKeywords = ['choose length at left', 'out of stock'];
+            const priceInBRegex = /\\([\\$€]?[\\d.,]+(?:\\/[^)]*)?\\)/;
             const tbodies = document.querySelectorAll('tbody.listing-inner, tbody[id^="listingcontainer"]');
             for (const tbody of tbodies) {
                 let sortGroup = '';
@@ -886,7 +902,7 @@ async def _collect_products_from_listing(
                     if (mtfText) notes = (notes + ' ' + mtfText).trim();
                     const oeSpan = td.querySelector('span[title*="Alternate"], span[title*="OE Part"]');
                     const alternateOe = oeSpan ? (oeSpan.textContent || '').trim() : '';
-                    const priceEl = tr.querySelector('.listing-price span, [id^="dprice"] span, .listing-amount-bold span');
+                    let priceEl = tr.querySelector('.listing-price span, .seeopt-price-text, [id^="dprice"] span, .listing-amount-bold span');
                     let price = priceEl ? (priceEl.textContent || '').trim() : '';
                     if (!price && tr.querySelector('span[id^="dprice"]')) {
                         const v = tr.querySelector('span[id^="dprice"][id$="v]"]');
@@ -901,7 +917,51 @@ async def _collect_products_from_listing(
                     const part_number = pn ? pn.textContent?.trim() : '';
                     const description = desc ? desc.textContent?.trim() : '';
                     const info_url = infoLink && infoLink.href ? infoLink.href : '';
-                    if (part_number || manufacturer || info_url) {
+                    if (!(part_number || manufacturer || info_url)) continue;
+                    const priceLower = (price || '').toLowerCase();
+                    const isOutOfStock = priceLower.includes('out of stock');
+                    const isMultiOption = multiOptionKeywords.some(k => priceLower.includes(k));
+                    if (isOutOfStock) {
+                        out.push({
+                            manufacturer,
+                            part_number,
+                            description,
+                            price,
+                            info_url,
+                            market_flags: marketFlags,
+                            notes,
+                            image_url: imageUrl,
+                            sort_group: sortGroup,
+                            alternate_oe_numbers: alternateOe
+                        });
+                    } else if (isMultiOption) {
+                        const prices = [];
+                        const bTags = tbody.querySelectorAll('b');
+                        for (const b of bTags) {
+                            const txt = (b.textContent || '').trim();
+                            const m = txt.match(priceInBRegex);
+                            if (m) {
+                                const p = m[0];
+                                if (prices.indexOf(p) === -1) prices.push(p);
+                            }
+                        }
+                        if (prices.length > 0) {
+                            for (const p of prices) {
+                                out.push({
+                                    manufacturer,
+                                    part_number,
+                                    description,
+                                    price: p,
+                                    info_url,
+                                    market_flags: marketFlags,
+                                    notes,
+                                    image_url: imageUrl,
+                                    sort_group: sortGroup,
+                                    alternate_oe_numbers: alternateOe
+                                });
+                            }
+                        }
+                    } else {
                         out.push({
                             manufacturer,
                             part_number,
@@ -1540,6 +1600,131 @@ async def _process_detail_queue(keep_browser_open: bool | None = None):
             await browser.close()
 
 
+def _build_launch_options():
+    """Shared Playwright launch options (proxy, headless, args)."""
+    proxy_url = get_proxy_url()
+    opts = {
+        "headless": HEADLESS,
+        "args": [
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shim-usage",
+            "--disable-accelerated-2d-canvas",
+            "--disable-gpu",
+        ],
+    }
+    if proxy_url and "@" in proxy_url:
+        try:
+            after_http = proxy_url.split("://", 1)[1]
+            user_pass, server = after_http.rsplit("@", 1)
+            u, pw = user_pass.split(":", 1) if ":" in user_pass else (user_pass, "")
+            opts["proxy"] = {"server": f"http://{server}", "username": u, "password": pw}
+        except Exception as e:
+            logger.warning("Proxy URL parse failed: %s; running without proxy.", e)
+    return opts
+
+
+async def run_export_make_year_model(keep_browser_open: bool | None = None) -> int:
+    """
+    Step 1 only: discover all make/year/model from the catalog and export to make_year_model.csv.
+    Returns number of rows written to CSV. Use this script alone to refresh the CSV.
+    """
+    init_catalog_product_db()
+    conn = get_catalog_product_connection()
+    checkpoint = get_checkpoint(conn)
+    conn.close()
+
+    on_route, add_page_fn, bw_data = _create_bandwidth_tracker()
+    launch_options = _build_launch_options()
+
+    logger.info("Step 1: Export make/year/model CSV – launching browser...")
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(**launch_options)
+        ctx = await browser.new_context(
+            viewport={"width": 1280, "height": 720},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            locale="en-US",
+            timezone_id="America/New_York",
+        )
+        await ctx.route("**/*", on_route)
+        page = await ctx.new_page()
+        if STEALTH_AVAILABLE and stealth_async:
+            await stealth_async(page, StealthConfig())
+        vehicles = await _discover_vehicles(page, checkpoint)
+        n_csv = _write_make_year_model_csv(vehicles)
+        if n_csv:
+            logger.info("Exported %d make/year/model pairs to %s", n_csv, MAKE_YEAR_MODEL_CSV)
+        await page.close()
+        await ctx.close()
+        await browser.close()
+        await _wait_before_close(keep_browser_open if keep_browser_open is not None else KEEP_BROWSER_OPEN)
+    logger.info("Step 1 finished. Bandwidth: %.1f KB for %d pages", bw_data["bytes"] / 1024, bw_data["pages"])
+    return n_csv or 0
+
+
+async def run_scrape_from_csv(keep_browser_open: bool | None = None) -> int:
+    """
+    Step 2 only: load make_year_model.csv and scrape each vehicle's products into rockauto.db.
+    Returns total products saved. Run after run_export_make_year_model (or use an existing CSV).
+    """
+    init_db()
+    rows_csv = _load_make_year_model_csv()
+    if not rows_csv:
+        logger.warning("No rows in %s. Run export_make_year_model.py first to generate it.", MAKE_YEAR_MODEL_CSV)
+        return 0
+
+    on_route, add_page_fn, bw_data = _create_bandwidth_tracker()
+    launch_options = _build_launch_options()
+
+    logger.info("Step 2: Scrape from CSV – loaded %d rows from %s. Launching browser...", len(rows_csv), MAKE_YEAR_MODEL_CSV)
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(**launch_options)
+        ctx = await browser.new_context(
+            viewport={"width": 1280, "height": 720},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            locale="en-US",
+            timezone_id="America/New_York",
+        )
+        await ctx.route("**/*", on_route)
+        page = await ctx.new_page()
+        if STEALTH_AVAILABLE and stealth_async:
+            await stealth_async(page, StealthConfig())
+        rockauto_conn = get_connection()
+        try:
+            total_products = 0
+            for row in rows_csv:
+                if _shutdown:
+                    break
+                url = (row.get("url") or "").strip()
+                if not url or "/en/catalog/" not in url:
+                    continue
+                path = url.split("/en/catalog/")[-1].strip("/").split("?")[0]
+                parts = [p.strip() for p in path.split(",") if p.strip()]
+                if len(parts) < 3:
+                    continue
+                make_slug, year, model_slug = parts[0], parts[1], parts[2]
+                make_name = row.get("make") or _slug_to_label(make_slug)
+                model_name = row.get("model") or _slug_to_label(model_slug)
+                n, soft_blocked = await _scrape_vehicle_to_rockauto(
+                    page, make_slug, make_name, year, model_slug, model_name, add_page_fn, rockauto_conn
+                )
+                total_products += n
+                if soft_blocked:
+                    logger.warning("Stopping scrape due to soft block.")
+                    break
+            if total_products:
+                logger.info("Saved %d products to rockauto.db", total_products)
+        finally:
+            rockauto_conn.close()
+        await page.close()
+        await ctx.close()
+        await browser.close()
+        await _wait_before_close(keep_browser_open if keep_browser_open is not None else KEEP_BROWSER_OPEN)
+    logger.info("Step 2 finished. Bandwidth: %.1f KB for %d pages", bw_data["bytes"] / 1024, bw_data["pages"])
+    return total_products
+
+
 async def _run_scraper(keep_browser_open: bool | None = None):
     """Discover full catalog (all makes/years/models) and scrape all products. No vehicles.csv."""
     init_db()
@@ -1549,33 +1734,10 @@ async def _run_scraper(keep_browser_open: bool | None = None):
     conn.close()
 
     on_route, add_page_fn, bw_data = _create_bandwidth_tracker()
-    proxy_url = get_proxy_url()
+    launch_options = _build_launch_options()
 
     logger.info("Launching browser (discover stage – full catalog, all products)...")
     async with async_playwright() as p:
-        launch_options = {
-            "headless": HEADLESS,
-            "args": [
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-accelerated-2d-canvas",
-                "--disable-gpu",
-            ],
-        }
-        if proxy_url and "@" in proxy_url:
-            try:
-                after_http = proxy_url.split("://", 1)[1]
-                user_pass, server = after_http.rsplit("@", 1)
-                u, pw = user_pass.split(":", 1) if ":" in user_pass else (user_pass, "")
-                launch_options["proxy"] = {
-                    "server": f"http://{server}",
-                    "username": u,
-                    "password": pw,
-                }
-            except Exception as e:
-                logger.warning("Proxy URL parse failed: %s; running without proxy.", e)
         browser = await p.chromium.launch(**launch_options)
         logger.info("Browser launched (discover stage).")
         ctx = await browser.new_context(
