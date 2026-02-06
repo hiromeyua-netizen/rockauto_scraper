@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import csv
 import logging
+import re
 import signal
 import sys
 from datetime import datetime
@@ -394,6 +395,46 @@ def _label_to_slug(label: str) -> str:
     if not label:
         return ""
     return label.lower().replace(" ", "+").strip()
+
+
+def _normalize_price(raw: str | None) -> str | None:
+    """
+    Normalize price to currency symbol + number only (e.g. €5.47). No conversion.
+    Strips parentheses, '/Each', and other non-numeric text. Keeps original symbol (€ or $).
+    Returns None if no number found. Leaves 'out of stock' and similar as-is.
+    """
+    if not raw or not (s := raw.strip()):
+        return None
+    lower = s.lower()
+    if "out of stock" in lower:
+        return s
+    # Remove parentheses and normalize spaces
+    s = s.replace("(", "").replace(")", "").strip()
+    # Remove /Each, /each, etc.
+    s = re.sub(r"/\s*each\s*", "", s, flags=re.IGNORECASE).strip()
+    s = re.sub(r"/\s*$", "", s).strip()
+    # Find currency symbol (keep first found; do not convert)
+    symbol = ""
+    for sym in ("€", "$", "£"):
+        if sym in s:
+            symbol = sym
+            break
+    if not symbol:
+        symbol = "€"
+    # Extract number: digits with optional . or , as decimal separator (EU or US format)
+    m = re.search(r"[\d.,]+", s)
+    if not m:
+        return None
+    num_str = m.group(0)
+    if "," in num_str and "." in num_str:
+        last_dot, last_comma = num_str.rfind("."), num_str.rfind(",")
+        decimal_at = max(last_dot, last_comma)
+        decimal_char = num_str[decimal_at]
+        num_str = num_str[:decimal_at].replace(".", "").replace(",", "") + num_str[decimal_at:].replace(".", "").replace(",", "")
+        num_str = num_str.replace(decimal_char, ".", 1)
+    else:
+        num_str = num_str.replace(",", ".")
+    return f"{symbol}{num_str}"
 
 
 def _write_make_year_model_csv(vehicles: list[dict]) -> int:
@@ -999,7 +1040,8 @@ async def _collect_products_from_listing(
         manufacturer = (r.get("manufacturer") or "").strip() or None
         part_number = (r.get("part_number") or "").strip() or None
         description = (r.get("description") or "").strip() or None
-        price = (r.get("price") or "").strip() or None
+        raw_price = (r.get("price") or "").strip() or None
+        price = _normalize_price(raw_price) if raw_price else None
         info_url = (r.get("info_url") or "").strip() or None
         market_flags = (r.get("market_flags") or "").strip() or None
         notes = (r.get("notes") or "").strip() or None
@@ -1070,7 +1112,7 @@ async def _resolve_choose_prices_on_listing(page: Page, products: list[dict]) ->
             p.get("manufacturer"),
         )
         if resolved:
-            p["price"] = resolved
+            p["price"] = _normalize_price(resolved) or resolved
 
 
 async def _extract_detail_from_info_page(page: Page) -> dict:
