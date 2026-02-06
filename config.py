@@ -43,8 +43,8 @@ EMPTY_RESULT_INDICATORS = [
 # Bandwidth
 BANDWIDTH_LOG_EVERY_N_PAGES = 100
 
-# Browser visibility (False = show window, required for scraping; set ROCKAUTO_HEADLESS=1 for headless)
-HEADLESS = os.getenv("ROCKAUTO_HEADLESS", "0").strip().lower() in ("1", "true", "yes")
+# Browser visibility (default True for headless, e.g. Ubuntu/server; set ROCKAUTO_HEADLESS=0 to show window)
+HEADLESS = os.getenv("ROCKAUTO_HEADLESS", "1").strip().lower() in ("1", "true", "yes")
 
 # Keep browser open after run until user presses Enter (default True when visible; set ROCKAUTO_KEEP_BROWSER_OPEN=0 to close immediately)
 _env_keep = os.getenv("ROCKAUTO_KEEP_BROWSER_OPEN", "").strip().lower()
