@@ -370,6 +370,15 @@ def get_checkpoint(conn: sqlite3.Connection) -> dict:
     return dict(row)
 
 
+def delete_rockauto_by_vehicle(conn: sqlite3.Connection, year: str, make: str, model: str) -> int:
+    """Delete all rows for the given vehicle (year, make, model). Returns number of rows deleted."""
+    cur = conn.execute(
+        "DELETE FROM rockauto WHERE year = ? AND make = ? AND model = ?",
+        (year, make, model),
+    )
+    return cur.rowcount
+
+
 def insert_rockauto(conn: sqlite3.Connection, rows: list[dict]) -> int:
     """Insert scraped parts into rockauto table: year, make, model, engine, category, part_type, manufacturer, part_number, price, image_url, scraped_at."""
     if not rows:

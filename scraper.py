@@ -54,6 +54,7 @@ try:
         init_db,
         get_checkpoint,
         save_checkpoint,
+        delete_rockauto_by_vehicle,
         insert_rockauto,
         insert_product_urls,
         fetch_product_urls,
@@ -99,6 +100,7 @@ except ImportError:
         init_db,
         get_checkpoint,
         save_checkpoint,
+        delete_rockauto_by_vehicle,
         insert_rockauto,
         insert_product_urls,
         fetch_product_urls,
@@ -873,7 +875,6 @@ async def _collect_products_from_listing(
     rows = await page.evaluate(
         """(baseUrl) => {
             const out = [];
-            const multiOptionKeywords = ['choose length at left', 'out of stock'];
             const priceInBRegex = /\\([\\$€]?[\\d.,]+(?:\\/[^)]*)?\\)/;
             const tbodies = document.querySelectorAll('tbody.listing-inner, tbody[id^="listingcontainer"]');
             for (const tbody of tbodies) {
@@ -920,7 +921,7 @@ async def _collect_products_from_listing(
                     if (!(part_number || manufacturer || info_url)) continue;
                     const priceLower = (price || '').toLowerCase();
                     const isOutOfStock = priceLower.includes('out of stock');
-                    const isMultiOption = multiOptionKeywords.some(k => priceLower.includes(k));
+                    const isChooseAtLeft = priceLower.startsWith('choose');
                     if (isOutOfStock) {
                         out.push({
                             manufacturer,
@@ -934,19 +935,18 @@ async def _collect_products_from_listing(
                             sort_group: sortGroup,
                             alternate_oe_numbers: alternateOe
                         });
-                    } else if (isMultiOption) {
-                        const prices = [];
-                        const bTags = tbody.querySelectorAll('b');
-                        for (const b of bTags) {
-                            const txt = (b.textContent || '').trim();
-                            const m = txt.match(priceInBRegex);
-                            if (m) {
-                                const p = m[0];
-                                if (prices.indexOf(p) === -1) prices.push(p);
+                    } else if (isChooseAtLeft) {
+                        const optionPrices = [];
+                        const spans = tbody.querySelectorAll('span.di.vmiddle');
+                        for (const span of spans) {
+                            const b = span.querySelector('b');
+                            if (b) {
+                                const p = (b.textContent || '').trim();
+                                if (p && /[0-9$€£.,()]/.test(p)) optionPrices.push(p);
                             }
                         }
-                        if (prices.length > 0) {
-                            for (const p of prices) {
+                        if (optionPrices.length > 0) {
+                            for (const p of optionPrices) {
                                 out.push({
                                     manufacturer,
                                     part_number,
@@ -960,6 +960,19 @@ async def _collect_products_from_listing(
                                     alternate_oe_numbers: alternateOe
                                 });
                             }
+                        } else {
+                            out.push({
+                                manufacturer,
+                                part_number,
+                                description,
+                                price: null,
+                                info_url,
+                                market_flags: marketFlags,
+                                notes,
+                                image_url: imageUrl,
+                                sort_group: sortGroup,
+                                alternate_oe_numbers: alternateOe
+                            });
                         }
                     } else {
                         out.push({
@@ -1007,6 +1020,57 @@ async def _collect_products_from_listing(
                 "image_url": image_url,
             })
     return result
+
+
+async def _resolve_choose_price(page: Page, part_number: str | None, manufacturer: str | None) -> str | None:
+    """
+    For a row that shows 'Choose Type at Left' (or any price starting with 'Choose'),
+    find that row, click the first option (select or link), wait for price to update, return new price as-is.
+    Returns None if row not found or price could not be resolved.
+    """
+    if not (part_number or manufacturer):
+        return None
+    search = (part_number or "") or (manufacturer or "")
+    if not search:
+        return None
+    try:
+        tr = page.locator("tr").filter(has_text=search).first
+        await tr.wait_for(state="visible", timeout=3000)
+    except Exception:
+        return None
+    try:
+        select = tr.locator("select").first
+        if await select.count() > 0:
+            await select.select_option(index=0)
+        else:
+            link = tr.locator("a.ra-btn, a[href*='javascript'], .seeopt a, a.navlabellink").first
+            if await link.count() > 0:
+                await link.click()
+        await asyncio.sleep(0.6)
+        price_el = tr.locator(".listing-price span, .seeopt-price-text, [id^='dprice'] span, .listing-amount-bold span").first
+        if await price_el.count() > 0:
+            raw = await price_el.text_content()
+            price = (raw or "").strip()
+            if price and not price.lower().startswith("choose"):
+                return price
+    except Exception:
+        pass
+    return None
+
+
+async def _resolve_choose_prices_on_listing(page: Page, products: list[dict]) -> None:
+    """Resolve any product whose price starts with 'choose' by clicking first option in that row. Modifies products in place."""
+    for p in products:
+        price = p.get("price") or ""
+        if not str(price).strip().lower().startswith("choose"):
+            continue
+        resolved = await _resolve_choose_price(
+            page,
+            p.get("part_number"),
+            p.get("manufacturer"),
+        )
+        if resolved:
+            p["price"] = resolved
 
 
 async def _extract_detail_from_info_page(page: Page) -> dict:
@@ -1259,6 +1323,11 @@ async def _scrape_vehicle_to_rockauto(
     engine, category, part_type, manufacturer, part_number, price, scraped_at). Returns (parts_count, soft_blocked).
     """
     logger.info("Scraping to rockauto: %s %s %s", year, make_name, model_name)
+    deleted = delete_rockauto_by_vehicle(rockauto_conn, year, make_name, model_name)
+    if deleted:
+        logger.info("  Deleted %d existing rows for this vehicle (replacing with fresh scrape)", deleted)
+    rockauto_conn.commit()
+
     vehicle_path = f"{make_slug},{year},{model_slug}"
     vehicle_url = _make_catalog_url(make_slug, year, model_slug, None)
 
@@ -1347,6 +1416,7 @@ async def _scrape_vehicle_to_rockauto(
                     page, year, make_name, model_name, eng_name or "", cat_name, pt_name
                 )
                 if products:
+                    await _resolve_choose_prices_on_listing(page, products)
                     insert_rockauto(rockauto_conn, products)
                     rockauto_conn.commit()
                     total_parts += len(products)
