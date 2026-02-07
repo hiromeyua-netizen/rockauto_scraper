@@ -14,6 +14,7 @@ from pathlib import Path
 import json
 
 from playwright.async_api import async_playwright, Page, Route, Request, BrowserContext, Browser
+from tqdm import tqdm
 
 # Add parent for .env load if present
 _rockauto_root = Path(__file__).resolve().parent
@@ -1781,23 +1782,29 @@ async def run_scrape_from_csv(keep_browser_open: bool | None = None) -> int:
         rockauto_conn = get_connection()
         try:
             total_products = 0
-            for row in rows_csv:
+            total_vehicles = len(rows_csv)
+            pbar = tqdm(rows_csv, desc="Vehicles", unit="vehicle", total=total_vehicles, ncols=100)
+            for row in pbar:
                 if _shutdown:
                     break
                 url = (row.get("url") or "").strip()
                 if not url or "/en/catalog/" not in url:
+                    pbar.set_postfix_str("skipped")
                     continue
                 path = url.split("/en/catalog/")[-1].strip("/").split("?")[0]
                 parts = [p.strip() for p in path.split(",") if p.strip()]
                 if len(parts) < 3:
+                    pbar.set_postfix_str("skipped")
                     continue
                 make_slug, year, model_slug = parts[0], parts[1], parts[2]
                 make_name = row.get("make") or _slug_to_label(make_slug)
                 model_name = row.get("model") or _slug_to_label(model_slug)
+                pbar.set_postfix_str(f"{year} {make_name} {model_name}")
                 n, soft_blocked = await _scrape_vehicle_to_rockauto(
                     page, make_slug, make_name, year, model_slug, model_name, add_page_fn, rockauto_conn
                 )
                 total_products += n
+                pbar.set_postfix_str(f"{year} {make_name} {model_name} ({n} parts)")
                 if soft_blocked:
                     logger.warning("Stopping scrape due to soft block.")
                     break
@@ -1868,23 +1875,29 @@ async def _run_scraper(keep_browser_open: bool | None = None):
             rockauto_conn = get_connection()
             try:
                 total_products = 0
-                for row in rows_csv:
+                total_vehicles = len(rows_csv)
+                pbar = tqdm(rows_csv, desc="Vehicles", unit="vehicle", total=total_vehicles, ncols=100)
+                for row in pbar:
                     if _shutdown:
                         break
                     url = (row.get("url") or "").strip()
                     if not url or "/en/catalog/" not in url:
+                        pbar.set_postfix_str("skipped")
                         continue
                     path = url.split("/en/catalog/")[-1].strip("/").split("?")[0]
                     parts = [p.strip() for p in path.split(",") if p.strip()]
                     if len(parts) < 3:
+                        pbar.set_postfix_str("skipped")
                         continue
                     make_slug, year, model_slug = parts[0], parts[1], parts[2]
                     make_name = row.get("make") or _slug_to_label(make_slug)
                     model_name = row.get("model") or _slug_to_label(model_slug)
+                    pbar.set_postfix_str(f"{year} {make_name} {model_name}")
                     n, soft_blocked = await _scrape_vehicle_to_rockauto(
                         page2, make_slug, make_name, year, model_slug, model_name, add_page_fn, rockauto_conn
                     )
                     total_products += n
+                    pbar.set_postfix_str(f"{year} {make_name} {model_name} ({n} parts)")
                     if soft_blocked:
                         logger.warning("Stopping scrape due to soft block.")
                         break
