@@ -1476,18 +1476,21 @@ def _load_vehicles_csv(resume_after: dict | None = None) -> list[dict]:
     return out
 
 
-async def _discover_vehicles(page: Page, resume_after: dict) -> list[dict]:
+async def _discover_vehicles(page: Page, resume_after: dict, progress_bar: bool = True) -> list[dict]:
     """Build full vehicle list (make, year, model) from catalog; respect resume_after to skip already-done. No catalog tree persisted."""
     makes = await _get_makes_from_catalog(page)
     tasks = []
     last_make = resume_after.get("last_make_slug") or ""
     last_year = resume_after.get("last_year") or ""
     last_model = resume_after.get("last_model_slug") or ""
-    for make_slug, make_name in makes:
+    make_iter = tqdm(makes, desc="Discovering", unit="make", total=len(makes), ncols=100) if progress_bar else makes
+    for make_slug, make_name in make_iter:
         try:
             years = await _get_years_for_make(page, make_slug)
         except Exception as e:
             logger.warning("Skipping make %s: %s", make_slug, e)
+            if progress_bar:
+                make_iter.set_postfix_str(f"{make_name} (skipped)")
             continue
         for year in years:
             try:
@@ -1508,6 +1511,8 @@ async def _discover_vehicles(page: Page, resume_after: dict) -> list[dict]:
                     "engine_slug": None,
                     "engine_name": None,
                 })
+        if progress_bar:
+            make_iter.set_postfix_str(f"{make_name} ({len(tasks)} vehicles)")
     return tasks
 
 
