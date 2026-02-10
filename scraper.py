@@ -437,12 +437,13 @@ def _write_make_year_model_csv(vehicles: list[dict]) -> int:
     return len(out)
 
 
-def _load_make_year_model_csv() -> list[dict]:
-    """Load make,year,model rows from MAKE_YEAR_MODEL_CSV. Returns list of dicts with make, year, model, url (url built from make/year/model if not in CSV)."""
-    if not MAKE_YEAR_MODEL_CSV.exists():
+def _load_make_year_model_csv(csv_path: Path | None = None) -> list[dict]:
+    """Load make,year,model rows from the given CSV path or MAKE_YEAR_MODEL_CSV. Returns list of dicts with make, year, model, url (url built from make/year/model if not in CSV)."""
+    path = (Path(csv_path) if csv_path else MAKE_YEAR_MODEL_CSV).resolve()
+    if not path.exists():
         return []
     out = []
-    with open(MAKE_YEAR_MODEL_CSV, newline="", encoding="utf-8") as f:
+    with open(path, newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
             make = (row.get("make") or "").strip()
             year = (row.get("year") or "").strip()
@@ -1757,21 +1758,23 @@ async def run_export_make_year_model(keep_browser_open: bool | None = None) -> i
     return n_csv or 0
 
 
-async def run_scrape_from_csv(keep_browser_open: bool | None = None) -> int:
+async def run_scrape_from_csv(keep_browser_open: bool | None = None, csv_path: Path | str | None = None) -> int:
     """
-    Step 2 only: load make_year_model.csv and scrape each vehicle's products into rockauto.db.
+    Step 2 only: load the given make/year/model CSV (or MAKE_YEAR_MODEL_CSV) and scrape each vehicle's products into rockauto.db.
     Returns total products saved. Run after run_export_make_year_model (or use an existing CSV).
+    Pass csv_path to use a specific CSV file (e.g. make_year_model1.csv) so multiple scrapers can run in parallel with different CSVs.
     """
     init_db()
-    rows_csv = _load_make_year_model_csv()
+    path = (Path(csv_path) if csv_path else MAKE_YEAR_MODEL_CSV).resolve()
+    rows_csv = _load_make_year_model_csv(path)
     if not rows_csv:
-        logger.warning("No rows in %s. Run export_make_year_model.py first to generate it.", MAKE_YEAR_MODEL_CSV)
+        logger.warning("No rows in %s. Run export_make_year_model.py first to generate it.", path)
         return 0
 
     on_route, add_page_fn, bw_data = _create_bandwidth_tracker()
     launch_options = _build_launch_options()
 
-    logger.info("Step 2: Scrape from CSV – loaded %d rows from %s. Launching browser...", len(rows_csv), MAKE_YEAR_MODEL_CSV)
+    logger.info("Step 2: Scrape from CSV – loaded %d rows from %s. Launching browser...", len(rows_csv), path)
     async with async_playwright() as p:
         browser = await p.chromium.launch(**launch_options)
         ctx = await browser.new_context(
